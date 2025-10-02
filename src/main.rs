@@ -142,16 +142,66 @@ impl Wallet {
         let public_key = xprv.public_key();
         let public_key_bytes = public_key.to_bytes();
         
-        // Remove the first byte (compression flag) and take the remaining 64 bytes
-        let uncompressed_key = &public_key_bytes[1..];
+        // Convert to secp256k1 public key for Ethereum address generation
+        let secp_pubkey = secp256k1::PublicKey::from_slice(&public_key_bytes)?;
+        
+        // Get uncompressed public key (65 bytes: 0x04 + 32 bytes x + 32 bytes y)
+        let uncompressed = secp_pubkey.serialize_uncompressed();
+        
+        // Remove the 0x04 prefix and take the remaining 64 bytes (x + y coordinates)
+        let xy_coords = &uncompressed[1..];
         
         // Hash with Keccak256 and take the last 20 bytes
         let mut hasher = Keccak256::new();
-        hasher.update(uncompressed_key);
+        hasher.update(xy_coords);
         let hash = hasher.finalize();
         let address_bytes = &hash[12..]; // Last 20 bytes
         
-        Ok(format!("0x{}", hex::encode(address_bytes)))
+        // Generate EIP-55 checksummed address
+        let address_hex = hex::encode(address_bytes);
+        let checksummed_address = Self::to_checksum_address(&address_hex);
+        
+        Ok(format!("0x{}", checksummed_address))
+    }
+    
+    // EIP-55 checksumming for Ethereum addresses
+    fn to_checksum_address(address: &str) -> String {
+        // Remove 0x prefix if present
+        let address = if address.starts_with("0x") {
+            &address[2..]
+        } else {
+            address
+        };
+        
+        // Convert to lowercase for hashing
+        let address_lower = address.to_lowercase();
+        
+        // Hash the lowercase address with Keccak256
+        let mut hasher = Keccak256::new();
+        hasher.update(address_lower.as_bytes());
+        let hash = hasher.finalize();
+        let hash_hex = hex::encode(hash);
+        
+        // Build checksummed address
+        let mut result = String::new();
+        for (i, c) in address.chars().enumerate() {
+            if c.is_ascii_digit() {
+                // Digits remain unchanged
+                result.push(c);
+            } else {
+                // Letters: uppercase if hash digit >= 8, lowercase otherwise
+                let hash_char = hash_hex.chars().nth(i).unwrap_or('0');
+                let hash_value = hash_char.to_digit(16).unwrap_or(0);
+                
+                if hash_value >= 8 {
+                    result.push(c.to_ascii_uppercase());
+                } else {
+                    result.push(c.to_ascii_lowercase());
+                }
+            }
+        }
+        
+        result
     }
 }
 
@@ -326,5 +376,49 @@ mod tests {
         assert!(bech32_address.starts_with("bc1q"));
         assert!(p2sh_address.starts_with("3"));
         assert!(p2pkh_address.starts_with("1"));
+    }
+    
+    #[test]
+    fn test_ethereum_known_mnemonic() {
+        // Test with the known mnemonic from the user for Ethereum
+        let mnemonic_str = "winter rather muscle weapon page flag cluster exotic bread lemon member fine";
+        let mnemonic = Mnemonic::parse(mnemonic_str).expect("Invalid mnemonic");
+        let seed_bytes = mnemonic.to_seed("");
+        
+        let ethereum_address = Wallet::generate_ethereum_address(&seed_bytes).expect("Failed to generate Ethereum address");
+        
+        println!("{}", "Generated Ethereum address:".bright_green().bold());
+        println!("{} {}", "Ethereum:".bright_blue().bold(), ethereum_address.bright_white());
+        
+        // Expected address from the user
+        let expected_ethereum = "0xd3E787e115aAF1a4d4c62aBc6E27ACacEF8c5565";
+        
+        println!("{}", "Expected Ethereum address:".bright_cyan().bold());
+        println!("{} {}", "Ethereum:".bright_blue().bold(), expected_ethereum.bright_white());
+        
+        // Check if addresses match exactly (including case)
+        assert_eq!(ethereum_address, expected_ethereum, "Ethereum addresses should match exactly");
+    }
+    
+    #[test]
+    fn test_ethereum_user_mnemonic() {
+        // Test with the user's specific mnemonic
+        let mnemonic_str = "prefer lens deal squeeze design label rich mom shallow marriage under paddle";
+        let mnemonic = Mnemonic::parse(mnemonic_str).expect("Invalid mnemonic");
+        let seed_bytes = mnemonic.to_seed("");
+        
+        let ethereum_address = Wallet::generate_ethereum_address(&seed_bytes).expect("Failed to generate Ethereum address");
+        
+        println!("{}", "Generated Ethereum address:".bright_green().bold());
+        println!("{} {}", "Ethereum:".bright_blue().bold(), ethereum_address.bright_white());
+        
+        // Expected address from the user
+        let expected_ethereum = "0x6B4b010941d59a1a875cb8Aa2De7ac1A10AAc93d";
+        
+        println!("{}", "Expected Ethereum address:".bright_cyan().bold());
+        println!("{} {}", "Ethereum:".bright_blue().bold(), expected_ethereum.bright_white());
+        
+        // Check if addresses match exactly (including case)
+        assert_eq!(ethereum_address, expected_ethereum, "Ethereum addresses should match exactly");
     }
 }

@@ -8,7 +8,7 @@ edition = "2021"
 bitcoin = "0.31"
 bip39 = "2.0"
 bip32 = "0.5"
-secp256k1 = "0.28"
+secp256k1 = { version = "0.28", features = ["recovery"] }
 bech32 = "0.9"
 sha2 = "0.10"
 hmac = "0.12"
