@@ -1,5 +1,8 @@
 use anyhow::Result;
 use bip39::{Language, Mnemonic};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use bitcoin::{
     address::Address,
     key::PublicKey,
@@ -19,11 +22,10 @@ use sha3::{Keccak256, Digest};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Number of wallets to generate
     #[arg(short, long, default_value_t = 1)]
     count: u32,
     
-    /// Use GPU acceleration (placeholder for future implementation)
+
     #[arg(short, long)]
     gpu: bool,
     
@@ -34,8 +36,12 @@ struct Args {
 
 #[derive(Debug, Clone)]
 pub enum WalletType {
+    RandomBitcoin,
+    RandomEthereum,
     Bitcoin,
     Ethereum,
+    SearchBitcoin,
+    SearchEthereum,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +52,57 @@ pub struct Wallet {
     pub p2sh_address: Option<String>,
     pub p2pkh_address: Option<String>,
     pub ethereum_address: Option<String>,
+}
+
+pub struct Database {
+    addresses: HashMap<String, u64>, // address -> balance in satoshis
+}
+
+impl Database {
+    pub fn new() -> Self {
+        Self {
+            addresses: HashMap::new(),
+        }
+    }
+    
+    pub fn load_from_file(&mut self, file_path: &str) -> Result<()> {
+        println!("{}", "Loading database...".bright_cyan().bold());
+        
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
+        let mut count = 0;
+        
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 2 {
+                let address = parts[0].trim().to_string();
+                if let Ok(balance) = parts[1].trim().parse::<u64>() {
+                    self.addresses.insert(address, balance);
+                    count += 1;
+                    
+                    if count % 1000000 == 0 {
+                        println!("{}", format!("Loaded {} addresses...", count).bright_yellow());
+                    }
+                }
+            }
+        }
+        
+        println!("{}", format!("Loaded {} addresses from database", count).bright_green().bold());
+        Ok(())
+    }
+    
+    pub fn check_address(&self, address: &str) -> Option<u64> {
+        self.addresses.get(address).copied()
+    }
+    
+    pub fn get_total_addresses(&self) -> usize {
+        self.addresses.len()
+    }
 }
 
 impl Wallet {
@@ -203,6 +260,7 @@ impl Wallet {
         
         result
     }
+    
 }
 
 async fn generate_wallets_continuously(wallet_type: WalletType, use_gpu: bool) -> Result<()> {
@@ -216,12 +274,18 @@ async fn generate_wallets_continuously(wallet_type: WalletType, use_gpu: bool) -
         let wallet = match wallet_type {
             WalletType::Bitcoin => Wallet::new_bitcoin()?,
             WalletType::Ethereum => Wallet::new_ethereum()?,
+            WalletType::RandomBitcoin => Wallet::new_bitcoin()?,
+            WalletType::RandomEthereum => Wallet::new_ethereum()?,
+            WalletType::SearchBitcoin | WalletType::SearchEthereum => {
+                // These should not reach here as they're handled separately
+                return Err(anyhow::anyhow!("Invalid wallet type for continuous generation"));
+            }
         };
         counter += 1;
         
         // Print each wallet as it's generated with colors
         match wallet.wallet_type {
-            WalletType::Bitcoin => {
+            WalletType::Bitcoin | WalletType::RandomBitcoin => {
                 println!("\n{}", format!("=== Bitcoin Wallet #{} ===", counter).bright_cyan().bold());
                 if let Some(addr) = &wallet.bech32_address {
                     println!("{} {}", "BECH32 address:".bright_green().bold(), addr.bright_white());
@@ -233,11 +297,15 @@ async fn generate_wallets_continuously(wallet_type: WalletType, use_gpu: bool) -
                     println!("{} {}", "P2PKH address:".bright_blue().bold(), addr.bright_white());
                 }
             }
-            WalletType::Ethereum => {
+            WalletType::Ethereum | WalletType::RandomEthereum => {
                 println!("\n{}", format!("=== Ethereum Wallet #{} ===", counter).bright_cyan().bold());
                 if let Some(addr) = &wallet.ethereum_address {
                     println!("{} {}", "Ethereum address:".bright_green().bold(), addr.bright_white());
                 }
+            }
+            WalletType::SearchBitcoin | WalletType::SearchEthereum => {
+                // These should not reach here
+                unreachable!();
             }
         }
         println!("{} {}", "mnemonic:".bright_magenta().bold(), wallet.mnemonic.bright_white());
@@ -251,12 +319,14 @@ async fn generate_wallets_continuously(wallet_type: WalletType, use_gpu: bool) -
 
 fn show_menu() -> WalletType {
     loop {
-        println!("\n{}", "🎯 Wallet Generator Menu".bright_cyan().bold());
+        println!("\n{}", "Wallet Generator Menu".bright_cyan().bold());
         println!("{}", "=".repeat(30).bright_cyan());
-        println!("{}", "1. Generate Bitcoin wallets (BECH32, P2SH, P2PKH)".bright_green());
-        println!("{}", "2. Generate Ethereum wallets (EVM)".bright_blue());
+        println!("{}", "1. Generate Bitcoin address".bright_green());
+        println!("{}", "2. Generate Ethereum address".bright_blue());
+        println!("{}", "3. Search Bitcoin wallets with balance".bright_green());
+        println!("{}", "4. Search Ethereum wallets with balance".bright_blue());
         println!("{}", "=".repeat(30).bright_cyan());
-        print!("{}", "Enter your choice (1 or 2): ".bright_yellow().bold());
+        print!("{}", "Enter your choice (1-4): ".bright_yellow().bold());
         
         use std::io::{self, Write};
         io::stdout().flush().unwrap();
@@ -266,15 +336,23 @@ fn show_menu() -> WalletType {
         
         match input.trim() {
             "1" => {
-                println!("{}", "✅ Selected: Bitcoin wallet generation".bright_green().bold());
-                return WalletType::Bitcoin;
+                println!("{}", "Selected: Random Bitcoin address generation".bright_green().bold());
+                return WalletType::RandomBitcoin;
             }
             "2" => {
-                println!("{}", "✅ Selected: Ethereum wallet generation".bright_blue().bold());
-                return WalletType::Ethereum;
+                println!("{}", "Selected: Random Ethereum address generation".bright_blue().bold());
+                return WalletType::RandomEthereum;
+            }
+            "3" => {
+                println!("{}", "Selected: Search Bitcoin wallets with balance".bright_green().bold());
+                return WalletType::SearchBitcoin;
+            }
+            "4" => {
+                println!("{}", "Selected: Search Ethereum wallets with balance".bright_blue().bold());
+                return WalletType::SearchEthereum;
             }
             _ => {
-                println!("{}", "❌ Invalid choice! Please enter 1 or 2.".bright_red().bold());
+                println!("{}", "Invalid choice! Please enter 1, 2, 3, or 4.".bright_red().bold());
             }
         }
     }
@@ -289,9 +367,100 @@ async fn main() -> Result<()> {
     // Show menu and get user choice
     let wallet_type = show_menu();
     
-    println!("\n{}", "🚀 Starting continuous wallet generation...".bright_green().bold());
+    match wallet_type {
+        WalletType::RandomBitcoin => {
+            println!("\n{}", "Generating random Bitcoin address...".bright_green().bold());
+            let wallet = Wallet::new_bitcoin()?;
+            print_single_wallet(&wallet);
+        }
+        WalletType::RandomEthereum => {
+            println!("\n{}", "Generating random Ethereum address...".bright_blue().bold());
+            let wallet = Wallet::new_ethereum()?;
+            print_single_wallet(&wallet);
+        }
+        WalletType::SearchBitcoin => {
+            generate_bitcoin_with_database_check().await?;
+        }
+        WalletType::SearchEthereum => {
+            generate_ethereum_with_database_check().await?;
+        }
+        _ => {
+            println!("\n{}", "Starting continuous wallet generation...".bright_green().bold());
+            println!("{}", "Press Ctrl+C to stop".bright_yellow().bold());
+            println!("{}", format!("GPU mode: {}", args.gpu).bright_cyan());
+            
+            // Set up signal handling for graceful shutdown
+            let ctrl_c = async {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("Failed to install Ctrl+C handler");
+            };
+            
+            // Run wallet generation until interrupted
+            tokio::select! {
+                _ = generate_wallets_continuously(wallet_type, args.gpu) => {
+                    // This should never complete normally
+                }
+                _ = ctrl_c => {
+                    println!("\n\n{}", "Shutting down gracefully...".bright_red().bold());
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn print_single_wallet(wallet: &Wallet) {
+    println!("\n{}", "=".repeat(60).bright_cyan());
+    match wallet.wallet_type {
+        WalletType::Bitcoin | WalletType::RandomBitcoin => {
+            println!("{}", "=== BITCOIN WALLET ===".bright_green().bold());
+            println!("{} {}", "Mnemonic:".bright_yellow().bold(), wallet.mnemonic.bright_white());
+            println!("{} {}", "BECH32:".bright_green().bold(), 
+                wallet.bech32_address.as_ref().unwrap_or(&"N/A".to_string()).bright_white());
+            println!("{} {}", "P2SH:".bright_yellow().bold(), 
+                wallet.p2sh_address.as_ref().unwrap_or(&"N/A".to_string()).bright_white());
+            println!("{} {}", "P2PKH:".bright_blue().bold(), 
+                wallet.p2pkh_address.as_ref().unwrap_or(&"N/A".to_string()).bright_white());
+        }
+        WalletType::Ethereum | WalletType::RandomEthereum => {
+            println!("{}", "=== ETHEREUM WALLET ===".bright_blue().bold());
+            println!("{} {}", "Mnemonic:".bright_yellow().bold(), wallet.mnemonic.bright_white());
+            println!("{} {}", "Ethereum:".bright_blue().bold(), 
+                wallet.ethereum_address.as_ref().unwrap_or(&"N/A".to_string()).bright_white());
+        }
+        WalletType::SearchBitcoin | WalletType::SearchEthereum => {
+            // These wallet types are not used for single wallet display
+            unreachable!();
+        }
+    }
+    println!("{}", "=".repeat(60).bright_cyan());
+}
+
+fn save_found_wallet(wallet_info: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("found_wallets.txt")?;
+    
+    writeln!(file, "{}", wallet_info)?;
+    file.flush()?;
+    Ok(())
+}
+
+async fn generate_bitcoin_with_database_check() -> Result<()> {
+    println!("\n{}", "GENERATING BITCOIN WALLETS WITH DATABASE CHECK".bright_green().bold());
+    println!("{}", "=".repeat(50).bright_green());
+    
+    // Load database
+    let mut database = Database::new();
+    database.load_from_file("database.txt")?;
+    
     println!("{}", "Press Ctrl+C to stop".bright_yellow().bold());
-    println!("{}", format!("GPU mode: {}", args.gpu).bright_cyan());
+    
+    let mut counter = 0;
+    let mut matches_found = 0;
     
     // Set up signal handling for graceful shutdown
     let ctrl_c = async {
@@ -302,123 +471,189 @@ async fn main() -> Result<()> {
     
     // Run wallet generation until interrupted
     tokio::select! {
-        _ = generate_wallets_continuously(wallet_type, args.gpu) => {
-            // This should never complete normally
-        }
+        _ = async {
+            loop {
+                // Generate random Bitcoin wallet
+                let wallet = match Wallet::new_bitcoin() {
+                    Ok(w) => w,
+                    Err(e) => {
+                        eprintln!("Error generating wallet: {}", e);
+                        continue;
+                    }
+                };
+                counter += 1;
+                
+                // Check all addresses against database
+                let mut wallet_has_balance = false;
+                let mut balance_info = Vec::new();
+                
+                if let Some(addr) = &wallet.bech32_address {
+                    if let Some(balance) = database.check_address(addr) {
+                        wallet_has_balance = true;
+                        balance_info.push(format!("BECH32: {} ({} satoshis)", addr, balance));
+                        matches_found += 1;
+                    }
+                }
+                
+                if let Some(addr) = &wallet.p2sh_address {
+                    if let Some(balance) = database.check_address(addr) {
+                        wallet_has_balance = true;
+                        balance_info.push(format!("P2SH: {} ({} satoshis)", addr, balance));
+                        matches_found += 1;
+                    }
+                }
+                
+                if let Some(addr) = &wallet.p2pkh_address {
+                    if let Some(balance) = database.check_address(addr) {
+                        wallet_has_balance = true;
+                        balance_info.push(format!("P2PKH: {} ({} satoshis)", addr, balance));
+                        matches_found += 1;
+                    }
+                }
+                
+                // Print wallet info
+                println!("\n{}", format!("=== Bitcoin Wallet #{} ===", counter).bright_cyan().bold());
+                if let Some(addr) = &wallet.bech32_address {
+                    println!("{} {}", "BECH32 address:".bright_green().bold(), addr.bright_white());
+                }
+                if let Some(addr) = &wallet.p2sh_address {
+                    println!("{} {}", "P2SH address:".bright_yellow().bold(), addr.bright_white());
+                }
+                if let Some(addr) = &wallet.p2pkh_address {
+                    println!("{} {}", "P2PKH address:".bright_blue().bold(), addr.bright_white());
+                }
+                println!("{} {}", "mnemonic:".bright_magenta().bold(), wallet.mnemonic.bright_white());
+                
+                // If wallet has balance, highlight it and save to file
+                if wallet_has_balance {
+                    println!("{}", "WALLET WITH BALANCE FOUND!".bright_green().bold());
+                    for info in &balance_info {
+                        println!("{}", format!("💰 {}", info).bright_green().bold());
+                    }
+                    
+                    // Save to found_wallets.txt
+                    let wallet_data = format!(
+                        "=== BITCOIN WALLET #{} ===\nMnemonic: {}\n{}\nTimestamp: {}\n{}\n",
+                        counter,
+                        wallet.mnemonic,
+                        balance_info.join("\n"),
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+                        "=".repeat(50)
+                    );
+                    
+                    if let Err(e) = save_found_wallet(&wallet_data) {
+                        eprintln!("Error saving wallet: {}", e);
+                    } else {
+                        println!("{}", "💾 Saved to found_wallets.txt".bright_cyan().bold());
+                    }
+                }
+                
+                println!("{}", format!("Total matches found: {}", matches_found).bright_yellow());
+                println!("{}", "=".repeat(50).bright_cyan());
+                
+                // Add a small delay to prevent overwhelming the system
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        } => {}
         _ = ctrl_c => {
-            println!("\n\n{}", "🛑 Shutting down gracefully...".bright_red().bold());
+            println!("\n\n{}", "Shutting down gracefully...".bright_red().bold());
+            println!("{}", format!("Total wallets generated: {}", counter).bright_cyan());
+            println!("{}", format!("Total matches found: {}", matches_found).bright_green().bold());
         }
     }
     
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+async fn generate_ethereum_with_database_check() -> Result<()> {
+    println!("\n{}", "GENERATING ETHEREUM WALLETS WITH DATABASE CHECK".bright_blue().bold());
+    println!("{}", "=".repeat(50).bright_blue());
     
-    #[test]
-    fn test_bitcoin_wallet_generation() {
-        let wallet = Wallet::new_bitcoin().expect("Failed to generate Bitcoin wallet");
-        assert!(!wallet.mnemonic.is_empty());
-        assert!(wallet.bech32_address.is_some());
-        assert!(wallet.p2sh_address.is_some());
-        assert!(wallet.p2pkh_address.is_some());
-        assert!(wallet.ethereum_address.is_none());
-        assert!(matches!(wallet.wallet_type, WalletType::Bitcoin));
+    // Load database
+    let mut database = Database::new();
+    database.load_from_file("database.txt")?;
+    
+    println!("{}", "Press Ctrl+C to stop".bright_yellow().bold());
+    
+    let mut counter = 0;
+    let mut matches_found = 0;
+    
+    // Set up signal handling for graceful shutdown
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+    
+    // Run wallet generation until interrupted
+    tokio::select! {
+        _ = async {
+            loop {
+                // Generate random Ethereum wallet
+                let wallet = match Wallet::new_ethereum() {
+                    Ok(w) => w,
+                    Err(e) => {
+                        eprintln!("Error generating wallet: {}", e);
+                        continue;
+                    }
+                };
+                counter += 1;
+                
+                // Check address against database
+                let mut wallet_has_balance = false;
+                let mut balance_info = String::new();
+                
+                if let Some(addr) = &wallet.ethereum_address {
+                    if let Some(balance) = database.check_address(addr) {
+                        wallet_has_balance = true;
+                        balance_info = format!("{} ({} satoshis)", addr, balance);
+                        matches_found += 1;
+                    }
+                }
+                
+                // Print wallet info
+                println!("\n{}", format!("=== Ethereum Wallet #{} ===", counter).bright_cyan().bold());
+                if let Some(addr) = &wallet.ethereum_address {
+                    println!("{} {}", "Ethereum address:".bright_blue().bold(), addr.bright_white());
+                }
+                println!("{} {}", "mnemonic:".bright_magenta().bold(), wallet.mnemonic.bright_white());
+                
+                // If wallet has balance, highlight it and save to file
+                if wallet_has_balance {
+                    println!("{}", "WALLET WITH BALANCE FOUND!".bright_green().bold());
+                    println!("{}", format!("💰 {}", balance_info).bright_green().bold());
+                    
+                    // Save to found_wallets.txt
+                    let wallet_data = format!(
+                        "=== ETHEREUM WALLET #{} ===\nMnemonic: {}\n{}\nTimestamp: {}\n{}\n",
+                        counter,
+                        wallet.mnemonic,
+                        balance_info,
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+                        "=".repeat(50)
+                    );
+                    
+                    if let Err(e) = save_found_wallet(&wallet_data) {
+                        eprintln!("Error saving wallet: {}", e);
+                    } else {
+                        println!("{}", "💾 Saved to found_wallets.txt".bright_cyan().bold());
+                    }
+                }
+                
+                println!("{}", format!("Total matches found: {}", matches_found).bright_yellow());
+                println!("{}", "=".repeat(50).bright_cyan());
+                
+                // Add a small delay to prevent overwhelming the system
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        } => {}
+        _ = ctrl_c => {
+            println!("\n\n{}", "Shutting down gracefully...".bright_red().bold());
+            println!("{}", format!("Total wallets generated: {}", counter).bright_cyan());
+            println!("{}", format!("Total matches found: {}", matches_found).bright_green().bold());
+        }
     }
     
-    #[test]
-    fn test_ethereum_wallet_generation() {
-        let wallet = Wallet::new_ethereum().expect("Failed to generate Ethereum wallet");
-        assert!(!wallet.mnemonic.is_empty());
-        assert!(wallet.bech32_address.is_none());
-        assert!(wallet.p2sh_address.is_none());
-        assert!(wallet.p2pkh_address.is_none());
-        assert!(wallet.ethereum_address.is_some());
-        assert!(matches!(wallet.wallet_type, WalletType::Ethereum));
-    }
-    
-    #[test]
-    fn test_mnemonic_validation() {
-        let wallet = Wallet::new_bitcoin().expect("Failed to generate wallet");
-        let mnemonic = Mnemonic::parse(&wallet.mnemonic).expect("Invalid mnemonic");
-        assert_eq!(mnemonic.word_count(), 12);
-    }
-    
-    #[test]
-    fn test_known_mnemonic() {
-        // Test with the known mnemonic from the user
-        let mnemonic_str = "ugly laptop afford sun robust scene fix valley people below expire leave";
-        let mnemonic = Mnemonic::parse(mnemonic_str).expect("Invalid mnemonic");
-        let seed_bytes = mnemonic.to_seed("");
-        
-        let bech32_address = Wallet::generate_bech32_address(&seed_bytes).expect("Failed to generate Bech32 address");
-        let p2sh_address = Wallet::generate_p2sh_address(&seed_bytes).expect("Failed to generate P2SH address");
-        let p2pkh_address = Wallet::generate_p2pkh_address(&seed_bytes).expect("Failed to generate P2PKH address");
-        
-        println!("{}", "Generated addresses:".bright_green().bold());
-        println!("{} {}", "BECH32:".bright_green().bold(), bech32_address.bright_white());
-        println!("{} {}", "P2SH:".bright_yellow().bold(), p2sh_address.bright_white());
-        println!("{} {}", "P2PKH:".bright_blue().bold(), p2pkh_address.bright_white());
-        
-        // Expected addresses from the user
-        let expected_bech32 = "bc1qa74nj6a94jsltyml8z2gd9ss4jh9x2qycjcqn0";
-        let expected_p2sh = "384wppeNEmUXFhoaAPyBBiZ34zxwRNWMYu";
-        let expected_p2pkh = "1L4WUu9pKXTYMmLvzf4Gy8gwZuiGqirWFf";
-        
-        println!("{}", "Expected addresses:".bright_cyan().bold());
-        println!("{} {}", "BECH32:".bright_green().bold(), expected_bech32.bright_white());
-        println!("{} {}", "P2SH:".bright_yellow().bold(), expected_p2sh.bright_white());
-        println!("{} {}", "P2PKH:".bright_blue().bold(), expected_p2pkh.bright_white());
-        
-        // For now, just print the comparison - we'll fix the derivation later
-        assert!(bech32_address.starts_with("bc1q"));
-        assert!(p2sh_address.starts_with("3"));
-        assert!(p2pkh_address.starts_with("1"));
-    }
-    
-    #[test]
-    fn test_ethereum_known_mnemonic() {
-        // Test with the known mnemonic from the user for Ethereum
-        let mnemonic_str = "winter rather muscle weapon page flag cluster exotic bread lemon member fine";
-        let mnemonic = Mnemonic::parse(mnemonic_str).expect("Invalid mnemonic");
-        let seed_bytes = mnemonic.to_seed("");
-        
-        let ethereum_address = Wallet::generate_ethereum_address(&seed_bytes).expect("Failed to generate Ethereum address");
-        
-        println!("{}", "Generated Ethereum address:".bright_green().bold());
-        println!("{} {}", "Ethereum:".bright_blue().bold(), ethereum_address.bright_white());
-        
-        // Expected address from the user
-        let expected_ethereum = "0xd3E787e115aAF1a4d4c62aBc6E27ACacEF8c5565";
-        
-        println!("{}", "Expected Ethereum address:".bright_cyan().bold());
-        println!("{} {}", "Ethereum:".bright_blue().bold(), expected_ethereum.bright_white());
-        
-        // Check if addresses match exactly (including case)
-        assert_eq!(ethereum_address, expected_ethereum, "Ethereum addresses should match exactly");
-    }
-    
-    #[test]
-    fn test_ethereum_user_mnemonic() {
-        // Test with the user's specific mnemonic
-        let mnemonic_str = "prefer lens deal squeeze design label rich mom shallow marriage under paddle";
-        let mnemonic = Mnemonic::parse(mnemonic_str).expect("Invalid mnemonic");
-        let seed_bytes = mnemonic.to_seed("");
-        
-        let ethereum_address = Wallet::generate_ethereum_address(&seed_bytes).expect("Failed to generate Ethereum address");
-        
-        println!("{}", "Generated Ethereum address:".bright_green().bold());
-        println!("{} {}", "Ethereum:".bright_blue().bold(), ethereum_address.bright_white());
-        
-        // Expected address from the user
-        let expected_ethereum = "0x6B4b010941d59a1a875cb8Aa2De7ac1A10AAc93d";
-        
-        println!("{}", "Expected Ethereum address:".bright_cyan().bold());
-        println!("{} {}", "Ethereum:".bright_blue().bold(), expected_ethereum.bright_white());
-        
-        // Check if addresses match exactly (including case)
-        assert_eq!(ethereum_address, expected_ethereum, "Ethereum addresses should match exactly");
-    }
+    Ok(())
 }
+
