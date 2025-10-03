@@ -25,8 +25,8 @@ A high-performance Rust-based cryptocurrency wallet generator that creates mnemo
 ### Build from Source
 
 ```bash
-git clone
-cd crackedcrypto
+git https://github.com/dauphongxd/cryptoderived.git
+cd cryptoderived
 cargo build --release
 ```
 
