@@ -1,6 +1,7 @@
 # CryptoDerived - Advanced Wallet Generator
 
 A high-performance Rust-based cryptocurrency wallet generator that creates mnemonic phrases and derives wallet addresses for both Bitcoin and Ethereum using BIP32 standards. Features database integration for wallet recovery and balance checking.
+![Menu](screenshot/menu.PNG)
 
 ## Features
 
@@ -57,6 +58,7 @@ Available options:
 - `--verbose, -v`: Enable verbose output
 
 ### Example Output
+![example](screenshot/example.PNG)
 
 **Single Bitcoin Wallet:**
 ```
